@@ -3,7 +3,6 @@ name: Scheduled Runpod Invocation
 on:
   schedule:
     - cron: "*/5 * * * *"  # every 5 minutes UTC
-  workflow_dispatch:
 
 jobs:
   call-runpod-endpoint:
