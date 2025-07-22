@@ -20,13 +20,3 @@ jobs:
 
           echo "Runpod response:"
           echo "$RESPONSE"
-
-      - name: Save response as GitHub artifact (optional)
-        uses: actions/upload-artifact@v4
-        with:
-          name: runpod-response
-          path: ./response.json
-        if: always()
-        continue-on-error: true
-        run: |
-          echo "$RESPONSE" > response.json
