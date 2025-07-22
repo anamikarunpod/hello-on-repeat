@@ -1,119 +1,156 @@
-name: Run Hello World on Runpod via REST
+name: RunPod Serverless with runpodctl Only
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
-  run-on-runpod:
+  run-serverless-job:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
+      - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Zip script
-        run: zip code.zip hello.py
-
-      - name: Create pod via REST
-        id: create_pod
+      - name: Install runpodctl
         run: |
-          RESPONSE=$(curl -s -X POST https://rest.runpod.io/v1/pods \
-            -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-                "allowedCudaVersions": [
-                  "12.4", "12.5"
-                ],
-                "cloudType": "SECURE",
-                "computeType": "GPU",
-                "containerDiskInGb": 50,
-                "countryCodes": [
-                  ""
-                ],
-                "cpuFlavorIds": [
-                  "cpu3c"
-                ],
-                "cpuFlavorPriority": "availability",
-                "dataCenterIds": [
-                ],
-                "dataCenterPriority": "availability",
-                "dockerEntrypoint": [],
-                "dockerStartCmd": [],
-                "env": {
-                  "ENV_VAR": "value"
-                },
-                "gpuCount": 1,
-                "gpuTypeIds": [
-                  "NVIDIA GeForce RTX 5090"
-                ],
-                "gpuTypePriority": "availability",
-                "imageName": "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04",
-                "interruptible": false,
-                "locked": false,
-                "minDiskBandwidthMBps": 1,
-                "minDownloadMbps": 1,
-                "minRAMPerGPU": 8,
-                "minUploadMbps": 1,
-                "minVCPUPerGPU": 2,
-                "name": "test pod on-repeat",
-                "networkVolumeId": "",
-                "ports": [
-                  "8888/http",
-                  "22/tcp"
-                ],
-                "supportPublicIp": true,
-                "templateId": "runpod-torch-v21",
-                "vcpuCount": 2,
-                "volumeInGb": 20,
-                "volumeMountPath": "/workspace"
-              }')
-          echo "$RESPONSE"
-          POD_ID=$(echo "$RESPONSE" | jq -r '.id')
-          echo "Created Pod ID: $POD_ID"
-          echo "POD_ID=$POD_ID" >> $GITHUB_ENV
+          curl -L -o runpodctl.tar.gz <https://github.com/runpod/runpodctl/releases/latest/download/runpodctl-linux-amd64.tar.gz>
+          tar -xzf runpodctl.tar.gz
+          sudo mv runpodctl /usr/local/bin/
+          runpodctl config --apiKey ${{ secrets.RUNPOD_API_KEY }}
 
-      - name: Wait for pod to be ready
+      - name: Create runpodctl Project
         run: |
-          for i in {1..10}; do
-            STATUS=$(curl -s -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
-              https://rest.runpod.io/v1/pods/$POD_ID | jq -r '.desiredStatus')
-            echo "Pod Status: $STATUS"
-            if [ "$STATUS" = "RUNNING" ]; then break; fi
-            sleep 10
-          done
+          TIMESTAMP=$(date +%s)
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
 
-      - name: Upload script to pod
-        run: |
-          curl -X PUT https://api.runpod.io/pod/$POD_ID/upload/code.zip \
-            -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
-            --data-binary @code.zip
+          # Create project from current directory with Dockerfile
+          runpodctl project create "scheduled-handler-$TIMESTAMP" \\
+            --path . \\
+            --description "Scheduled serverless job from GitHub Actions"
 
-      - name: Run script on pod
+          echo "PROJECT_NAME=scheduled-handler-$TIMESTAMP" >> $GITHUB_ENV
+
+      - name: Deploy Project as Serverless Endpoint
         run: |
-          RUN_RES=$(curl -s -X POST https://api.runpod.io/pod/$POD_ID/run \
-            -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "input": {
-                "command": "unzip code.zip && python hello.py"
-              }
-            }')
-          JOB_ID=$(echo "$RUN_RES" | jq -r '.id')
+          # Deploy the project as a serverless endpoint
+          ENDPOINT_RESPONSE=$(runpodctl project deploy $PROJECT_NAME \\
+            --gpu-types "NVIDIA GeForce RTX 4090,NVIDIA RTX A6000,NVIDIA A100 80GB PCIe" \\
+            --min-workers 0 \\
+            --max-workers 1 \\
+            --idle-timeout 5 \\
+            --env SCHEDULED_RUN=true \\
+            --env GITHUB_RUN_ID=${{ github.run_id }} \\
+            --env TIMESTAMP=$TIMESTAMP \\
+            --output json)
+
+          ENDPOINT_ID=$(echo "$ENDPOINT_RESPONSE" | jq -r '.id // .endpoint_id // .endpointId')
+          echo "ENDPOINT_ID=$ENDPOINT_ID" >> $GITHUB_ENV
+          echo "Created endpoint: $ENDPOINT_ID"
+
+      - name: Wait for Endpoint Deployment
+        run: |
+          echo "Waiting for endpoint deployment to complete..."
+          sleep 120  # Wait for build and deployment
+
+      - name: Check Endpoint Status
+        run: |
+          STATUS_RESPONSE=$(runpodctl get endpoint $ENDPOINT_ID --output json)
+          STATUS=$(echo "$STATUS_RESPONSE" | jq -r '.status // .desiredStatus')
+          echo "Endpoint status: $STATUS"
+          echo "ENDPOINT_STATUS=$STATUS" >> $GITHUB_ENV
+
+      - name: Trigger Job on Endpoint
+        run: |
+          # Trigger the serverless job
+          JOB_RESPONSE=$(runpodctl run endpoint $ENDPOINT_ID \\
+            --input '{
+              "scheduled_execution": true,
+              "timestamp": "'$TIMESTAMP'",
+              "github_run_id": "'${{ github.run_id }}'"
+            }' \\
+            --output json)
+
+          JOB_ID=$(echo "$JOB_RESPONSE" | jq -r '.id')
           echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
+          echo "Triggered job: $JOB_ID"
 
-      - name: Wait for job to complete
+      - name: Monitor Job Completion
         run: |
-          for i in {1..30}; do
-            STATUS=$(curl -s -X GET https://api.runpod.io/pod/$POD_ID/status/$JOB_ID \
-              -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" | jq -r '.status')
-            echo "Job Status: $STATUS"
-            if [ "$STATUS" = "COMPLETED" ] || [ "$STATUS" = "FAILED" ]; then break; fi
-            sleep 10
+          echo "Monitoring job $JOB_ID on endpoint $ENDPOINT_ID..."
+
+          # Poll job status until completion
+          MAX_ATTEMPTS=60  # 30 minutes max
+          ATTEMPT=0
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            JOB_STATUS_RESPONSE=$(runpodctl get job $JOB_ID --output json)
+            JOB_STATUS=$(echo "$JOB_STATUS_RESPONSE" | jq -r '.status')
+
+            echo "Job status: $JOB_STATUS (attempt $((ATTEMPT+1))/$MAX_ATTEMPTS)"
+
+            if [[ "$JOB_STATUS" == "COMPLETED" ]]; then
+              echo "Job completed successfully!"
+              echo "JOB_STATUS=COMPLETED" >> $GITHUB_ENV
+              break
+            elif [[ "$JOB_STATUS" == "FAILED" ]]; then
+              echo "Job failed!"
+              echo "JOB_STATUS=FAILED" >> $GITHUB_ENV
+              runpodctl logs job $JOB_ID --tail 100
+              exit 1
+            fi
+
+            sleep 30
+            ATTEMPT=$((ATTEMPT+1))
           done
 
-      - name: Delete pod
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "Job monitoring timed out"
+            exit 1
+          fi
+
+      - name: Get Job Results
+        if: env.JOB_STATUS == 'COMPLETED'
         run: |
-          curl -X DELETE https://api.runpod.io/pod/$POD_ID \
-            -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}"
+          echo "Retrieving job results..."
+          runpodctl get job $JOB_ID --output json | jq '.output'
+
+      - name: Get Job Logs
+        if: always()
+        run: |
+          if [ -n "$JOB_ID" ]; then
+            echo "Retrieving job logs..."
+            runpodctl logs job $JOB_ID --tail 100 || echo "No logs available"
+          fi
+
+      - name: Delete Endpoint
+        if: always()
+        run: |
+          if [ -n "$ENDPOINT_ID" ]; then
+            echo "Deleting endpoint $ENDPOINT_ID..."
+            runpodctl delete endpoint $ENDPOINT_ID || echo "Failed to delete endpoint"
+          fi
+
+      - name: Clean Up Project
+        if: always()
+        run: |
+          if [ -n "$PROJECT_NAME" ]; then
+            echo "Cleaning up project $PROJECT_NAME..."
+            runpodctl project delete $PROJECT_NAME || echo "Failed to delete project"
+          fi
+
+      - name: Job Summary
+        if: always()
+        run: |
+          echo "## Serverless Job Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Project Name:** ${PROJECT_NAME:-'Not created'}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Endpoint ID:** ${ENDPOINT_ID:-'Not created'}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job ID:** ${JOB_ID:-'Not triggered'}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job Status:** ${JOB_STATUS:-'Unknown'}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp:** ${TIMESTAMP:-'N/A'}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on Failure
+        if: failure()
+        run: |
+          echo "## ❌ Serverless Job Failed" >> $GITHUB_STEP_SUMMARY
+          echo "Check the logs above for details. Resources should be automatically cleaned up." >> $GITHUB_STEP_SUMMARY
