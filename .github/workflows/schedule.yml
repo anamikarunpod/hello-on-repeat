@@ -19,7 +19,7 @@ jobs:
       - name: Create pod via REST
         id: create_pod
         run: |
-          RESPONSE=$(curl -s -X POST https://api.runpod.io/pod \
+          RESPONSE=$(curl -s -X POST https://rest.runpod.io/v1/pods \
             -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{
@@ -78,7 +78,7 @@ jobs:
         run: |
           for i in {1..10}; do
             STATUS=$(curl -s -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
-              https://api.runpod.io/pod/$POD_ID | jq -r '.runtimeStatus')
+              https://rest.runpod.io/v1/pods/$POD_ID | jq -r '.desiredStatus')
             echo "Pod Status: $STATUS"
             if [ "$STATUS" = "RUNNING" ]; then break; fi
             sleep 10
