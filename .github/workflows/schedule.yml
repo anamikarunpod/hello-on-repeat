@@ -1,156 +1,32 @@
-name: RunPod Serverless with runpodctl Only
+name: Scheduled Runpod Invocation
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: "*/5 * * * *"  # every 5 minutes UTC
   workflow_dispatch:
 
 jobs:
-  run-serverless-job:
+  call-runpod-endpoint:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Install runpodctl
+      - name: Call Runpod Serverless Endpoint
         run: |
-          curl -L -o runpodctl.tar.gz <https://github.com/runpod/runpodctl/releases/latest/download/runpodctl-linux-amd64.tar.gz>
-          tar -xzf runpodctl.tar.gz
-          sudo mv runpodctl /usr/local/bin/
-          runpodctl config --apiKey ${{ secrets.RUNPOD_API_KEY }}
+          echo "Invoking Runpod Endpoint..."
+          RESPONSE=$(curl -s -X POST https://api.runpod.ai/v2/${{ secrets.ENDPOINT_ID }}/runsync \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
+            -d '{"input": {}}')
 
-      - name: Create runpodctl Project
-        run: |
-          TIMESTAMP=$(date +%s)
-          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+          echo "Runpod response:"
+          echo "$RESPONSE"
 
-          # Create project from current directory with Dockerfile
-          runpodctl project create "scheduled-handler-$TIMESTAMP" \\
-            --path . \\
-            --description "Scheduled serverless job from GitHub Actions"
-
-          echo "PROJECT_NAME=scheduled-handler-$TIMESTAMP" >> $GITHUB_ENV
-
-      - name: Deploy Project as Serverless Endpoint
-        run: |
-          # Deploy the project as a serverless endpoint
-          ENDPOINT_RESPONSE=$(runpodctl project deploy $PROJECT_NAME \\
-            --gpu-types "NVIDIA GeForce RTX 4090,NVIDIA RTX A6000,NVIDIA A100 80GB PCIe" \\
-            --min-workers 0 \\
-            --max-workers 1 \\
-            --idle-timeout 5 \\
-            --env SCHEDULED_RUN=true \\
-            --env GITHUB_RUN_ID=${{ github.run_id }} \\
-            --env TIMESTAMP=$TIMESTAMP \\
-            --output json)
-
-          ENDPOINT_ID=$(echo "$ENDPOINT_RESPONSE" | jq -r '.id // .endpoint_id // .endpointId')
-          echo "ENDPOINT_ID=$ENDPOINT_ID" >> $GITHUB_ENV
-          echo "Created endpoint: $ENDPOINT_ID"
-
-      - name: Wait for Endpoint Deployment
-        run: |
-          echo "Waiting for endpoint deployment to complete..."
-          sleep 120  # Wait for build and deployment
-
-      - name: Check Endpoint Status
-        run: |
-          STATUS_RESPONSE=$(runpodctl get endpoint $ENDPOINT_ID --output json)
-          STATUS=$(echo "$STATUS_RESPONSE" | jq -r '.status // .desiredStatus')
-          echo "Endpoint status: $STATUS"
-          echo "ENDPOINT_STATUS=$STATUS" >> $GITHUB_ENV
-
-      - name: Trigger Job on Endpoint
-        run: |
-          # Trigger the serverless job
-          JOB_RESPONSE=$(runpodctl run endpoint $ENDPOINT_ID \\
-            --input '{
-              "scheduled_execution": true,
-              "timestamp": "'$TIMESTAMP'",
-              "github_run_id": "'${{ github.run_id }}'"
-            }' \\
-            --output json)
-
-          JOB_ID=$(echo "$JOB_RESPONSE" | jq -r '.id')
-          echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
-          echo "Triggered job: $JOB_ID"
-
-      - name: Monitor Job Completion
-        run: |
-          echo "Monitoring job $JOB_ID on endpoint $ENDPOINT_ID..."
-
-          # Poll job status until completion
-          MAX_ATTEMPTS=60  # 30 minutes max
-          ATTEMPT=0
-
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            JOB_STATUS_RESPONSE=$(runpodctl get job $JOB_ID --output json)
-            JOB_STATUS=$(echo "$JOB_STATUS_RESPONSE" | jq -r '.status')
-
-            echo "Job status: $JOB_STATUS (attempt $((ATTEMPT+1))/$MAX_ATTEMPTS)"
-
-            if [[ "$JOB_STATUS" == "COMPLETED" ]]; then
-              echo "Job completed successfully!"
-              echo "JOB_STATUS=COMPLETED" >> $GITHUB_ENV
-              break
-            elif [[ "$JOB_STATUS" == "FAILED" ]]; then
-              echo "Job failed!"
-              echo "JOB_STATUS=FAILED" >> $GITHUB_ENV
-              runpodctl logs job $JOB_ID --tail 100
-              exit 1
-            fi
-
-            sleep 30
-            ATTEMPT=$((ATTEMPT+1))
-          done
-
-          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-            echo "Job monitoring timed out"
-            exit 1
-          fi
-
-      - name: Get Job Results
-        if: env.JOB_STATUS == 'COMPLETED'
-        run: |
-          echo "Retrieving job results..."
-          runpodctl get job $JOB_ID --output json | jq '.output'
-
-      - name: Get Job Logs
+      - name: Save response as GitHub artifact (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: runpod-response
+          path: ./response.json
         if: always()
+        continue-on-error: true
         run: |
-          if [ -n "$JOB_ID" ]; then
-            echo "Retrieving job logs..."
-            runpodctl logs job $JOB_ID --tail 100 || echo "No logs available"
-          fi
-
-      - name: Delete Endpoint
-        if: always()
-        run: |
-          if [ -n "$ENDPOINT_ID" ]; then
-            echo "Deleting endpoint $ENDPOINT_ID..."
-            runpodctl delete endpoint $ENDPOINT_ID || echo "Failed to delete endpoint"
-          fi
-
-      - name: Clean Up Project
-        if: always()
-        run: |
-          if [ -n "$PROJECT_NAME" ]; then
-            echo "Cleaning up project $PROJECT_NAME..."
-            runpodctl project delete $PROJECT_NAME || echo "Failed to delete project"
-          fi
-
-      - name: Job Summary
-        if: always()
-        run: |
-          echo "## Serverless Job Execution Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Project Name:** ${PROJECT_NAME:-'Not created'}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Endpoint ID:** ${ENDPOINT_ID:-'Not created'}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Job ID:** ${JOB_ID:-'Not triggered'}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Job Status:** ${JOB_STATUS:-'Unknown'}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Timestamp:** ${TIMESTAMP:-'N/A'}" >> $GITHUB_STEP_SUMMARY
-
-      - name: Notify on Failure
-        if: failure()
-        run: |
-          echo "## ❌ Serverless Job Failed" >> $GITHUB_STEP_SUMMARY
-          echo "Check the logs above for details. Resources should be automatically cleaned up." >> $GITHUB_STEP_SUMMARY
+          echo "$RESPONSE" > response.json
