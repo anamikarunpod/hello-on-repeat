@@ -12,7 +12,7 @@ jobs:
     steps:
       - name: Call Runpod Serverless Endpoint
         run: |
-          echo "Invoking Runpod Endpoint..."
+          echo "Invoking the Runpod Endpoint..."
           RESPONSE=$(curl -s -X POST https://api.runpod.ai/v2/${{ secrets.ENDPOINT_ID }}/runsync \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
