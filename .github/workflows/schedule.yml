@@ -69,14 +69,14 @@ jobs:
                 "volumeInGb": 20,
                 "volumeMountPath": "/workspace"
               }')
-
+          echo "$RESPONSE"
           POD_ID=$(echo "$RESPONSE" | jq -r '.id')
           echo "Created Pod ID: $POD_ID"
           echo "POD_ID=$POD_ID" >> $GITHUB_ENV
 
       - name: Wait for pod to be ready
         run: |
-          for i in {1..30}; do
+          for i in {1..10}; do
             STATUS=$(curl -s -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
               https://api.runpod.io/pod/$POD_ID | jq -r '.runtimeStatus')
             echo "Pod Status: $STATUS"
